@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: ubuntu-x64
+            arch: x86_64
+            ext: ''
+          - os: ubuntu-latest
+            target: ubuntu-arm64
+            arch: aarch64
+            ext: ''
+            cross: true
+          - os: macos-latest
+            target: macos
+            arch: x86_64
+            ext: ''
+          - os: windows-latest
+            target: windows
+            arch: x86_64
+            ext: '.exe'
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup (Ubuntu)
+        if: startsWith(matrix.target, 'ubuntu')
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential cmake ninja-build libgtest-dev libgmock-dev zlib1g-dev libsnappy-dev
+
+      - name: Setup (macOS)
+        if: matrix.target == 'macos'
+        run: brew install cmake ninja googletest snappy zlib
+
+      - name: Setup (Windows)
+        if: matrix.target == 'windows'
+        run: |
+          Remove-Item -Path vcpkg.json -ErrorAction SilentlyContinue
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git C:\vcpkg
+          C:\vcpkg\bootstrap-vcpkg.bat
+          C:\vcpkg\vcpkg install zlib snappy gtest --triplet x64-windows
+
+      - name: Build leveldb-mcpe (Ubuntu x64)
+        if: matrix.target == 'ubuntu-x64'
+        run: |
+          git clone --depth 1 https://github.com/Amulet-Team/leveldb-mcpe.git
+          cd leveldb-mcpe
+          sed -i 's/zlibstatic/${ZLIB_LIBRARIES}/g' CMakeLists.txt
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          make -j$(nproc)
+          sudo cp libleveldb_mcpe.so /usr/local/lib/
+          sudo ln -sf /usr/local/lib/libleveldb_mcpe.so /usr/local/lib/libleveldb.so
+          sudo cp -r ../include/leveldb /usr/local/include/
+          sudo ldconfig
+
+      - name: Build leveldb-mcpe (macOS)
+        if: matrix.target == 'macos'
+        run: |
+          git clone --depth 1 https://github.com/Amulet-Team/leveldb-mcpe.git
+          cd leveldb-mcpe
+          sed -i '' 's/zlibstatic/${ZLIB_LIBRARIES}/g' CMakeLists.txt
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$(brew --prefix zlib)" ..
+          make -j$(sysctl -n hw.ncpu)
+          sudo mkdir -p /usr/local/lib /usr/local/include
+          sudo cp libleveldb_mcpe.dylib /usr/local/lib/
+          sudo ln -sf /usr/local/lib/libleveldb_mcpe.dylib /usr/local/lib/libleveldb.dylib
+          sudo cp -r ../include/leveldb /usr/local/include/
+
+      - name: Configure (Native)
+        if: '!matrix.cross'
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -G Ninja
+
+      - name: Configure (ARM64 Cross)
+        if: matrix.cross
+        run: |
+          sudo apt install -y g++-aarch64-linux-gnu || true
+          wget -q https://zlib.net/fossils/zlib-1.3.1.tar.gz
+          tar xzf zlib-1.3.1.tar.gz
+          cd zlib-1.3.1
+          CC=aarch64-linux-gnu-gcc ./configure --prefix=/usr/aarch64-linux-gnu
+          make -j$(nproc)
+          sudo make install
+          cd ..
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/arm64-toolchain.cmake -G Ninja
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}
+          cp build/mcgen${{ matrix.ext }} dist/mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}/
+          cp build/mcgen_tests${{ matrix.ext }} dist/mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}/ 2>/dev/null || true
+          cp -r scripts dist/mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}/
+          cp -r docs dist/mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}/
+          cd dist
+          if [ "${{ matrix.target }}" = "windows" ]; then
+            7z a mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}.zip mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}
+          else
+            tar czf mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}.tar.gz mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}
+          fi
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/mcgen-${{ github.ref_name }}-${{ matrix.target }}-${{ matrix.arch }}.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

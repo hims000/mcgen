@@ -1,0 +1,61 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  sanitize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fix script permissions
+        run: chmod +x scripts/*.sh
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential cmake ninja-build libgtest-dev libgmock-dev zlib1g-dev libsnappy-dev valgrind
+
+      - name: Build leveldb-mcpe
+        run: |
+          git clone --depth 1 https://github.com/Amulet-Team/leveldb-mcpe.git
+          cd leveldb-mcpe
+          sed -i 's/zlibstatic/${ZLIB_LIBRARIES}/g' CMakeLists.txt
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Debug ..
+          make -j$(nproc)
+          sudo cp libleveldb_mcpe.so /usr/local/lib/
+          sudo ln -sf /usr/local/lib/libleveldb_mcpe.so /usr/local/lib/libleveldb.so
+          sudo cp -r ../include/leveldb /usr/local/include/
+          sudo ldconfig
+
+      - name: Build with AddressSanitizer
+        run: |
+          cmake -B build-asan -S . \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_LINKER_FLAGS="-fsanitize=address"
+          cmake --build build-asan
+
+      - name: Run ASan tests
+        run: ASAN_OPTIONS=detect_leaks=1 ./build-asan/mcgen_tests
+
+      - name: Build with ThreadSanitizer
+        run: |
+          cmake -B build-tsan -S . \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
+            -DCMAKE_C_FLAGS="-fsanitize=thread" \
+            -DCMAKE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build build-tsan
+
+      - name: Run TSan tests
+        run: ./build-tsan/mcgen_tests
+
+      - name: Valgrind check
+        run: valgrind --leak-check=full --error-exitcode=1 ./build-asan/mcgen --seed "valgrind" --platform java --radius 1 --output /tmp/mcgen-valgrind
+        timeout-minutes: 10
